@@ -12,10 +12,15 @@
             </div>
         </div>
         <div class="col-md-6 text-md-end mt-3 mt-md-0">
+            <div class="d-flex flex-wrap justify-content-md-end gap-2">
+            <a href="{{ route('admin.attendance.import') }}" class="btn btn-outline-primary">
+                <i class="fas fa-file-import me-1"></i> Import .dat
+            </a>
             <form method="GET" action="{{ route('admin.attendance.index') }}" class="d-inline-flex gap-2">
                 <input type="date" name="date" value="{{ $date }}" class="form-control" style="max-width: 220px;">
                 <button type="submit" class="btn btn-primary">Filter</button>
             </form>
+            </div>
         </div>
     </div>
 

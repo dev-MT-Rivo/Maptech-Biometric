@@ -7,6 +7,7 @@ use App\Models\Attendance;
 use App\Models\BiometricDevice;
 use App\Models\Employee;
 use App\Services\AttendanceAbsenceReconciler;
+use App\Services\ZktecoAttendanceService;
 use Carbon\Carbon;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
@@ -14,6 +15,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class AttendanceController extends Controller
 {
@@ -30,6 +32,103 @@ class AttendanceController extends Controller
         $employees = Employee::orderBy('first_name', 'asc')->get();
 
         return view('admin.attendance.index', compact('attendances', 'date', 'employees'));
+    }
+
+    public function importForm()
+    {
+        $devices = BiometricDevice::query()->orderBy('name')->get();
+
+        return view('admin.attendance.import', compact('devices'));
+    }
+
+    public function importDat(Request $request, ZktecoAttendanceService $attendanceService)
+    {
+        $validated = $request->validate([
+            'file' => 'required|file|extensions:dat|max:10240',
+            'device_id' => 'nullable|exists:biometric_devices,id',
+        ]);
+
+        $file = $validated['file'];
+        $contents = $file->get();
+        if (str_starts_with($contents, "\xFF\xFE")) {
+            $contents = mb_convert_encoding(substr($contents, 2), 'UTF-8', 'UTF-16LE');
+        } elseif (str_starts_with($contents, "\xFE\xFF")) {
+            $contents = mb_convert_encoding(substr($contents, 2), 'UTF-8', 'UTF-16BE');
+        } elseif (str_starts_with($contents, "\xEF\xBB\xBF")) {
+            $contents = substr($contents, 3);
+        }
+
+        $logs = [];
+        $skippedLines = 0;
+        $dates = [];
+
+        foreach (preg_split('/\r\n|\n|\r/', $contents) as $line) {
+            $line = trim($line);
+            if ($line === '' || stripos($line, 'ATTLOG') !== false || str_starts_with($line, 'SN=')) {
+                continue;
+            }
+
+            $parts = preg_split('/\t+/', $line);
+            if (count($parts) < 2 || trim($parts[0]) === '' || trim($parts[1]) === '') {
+                $skippedLines++;
+                continue;
+            }
+
+            // Full ZKTeco ATTLOG rows store Verify before Status; short rows omit Verify.
+            $status = trim($parts[count($parts) >= 4 ? 3 : 2] ?? '0');
+            if ($status !== '' && ! is_numeric($status)) {
+                $skippedLines++;
+                continue;
+            }
+
+            try {
+                $timestamp = Carbon::parse(trim($parts[1]));
+            } catch (\Throwable) {
+                $skippedLines++;
+                continue;
+            }
+
+            $logs[] = [
+                'pin' => trim($parts[0]),
+                'timestamp' => $timestamp->toDateTimeString(),
+                'status' => $status === '' ? 0 : (int) $status,
+            ];
+            $dates[] = $timestamp->toDateString();
+        }
+
+        if ($logs === []) {
+            throw ValidationException::withMessages([
+                'file' => 'No valid attendance rows were found. Upload a tab-separated ZKTeco ATTLOG .dat file.',
+            ]);
+        }
+
+        $device = isset($validated['device_id'])
+            ? BiometricDevice::findOrFail($validated['device_id'])
+            : null;
+        $source = $device?->name ?? 'DAT Import';
+        $processed = DB::transaction(
+            fn () => $attendanceService->processImportedLogs($source, $logs)
+        );
+
+        if ($processed === 0) {
+            throw ValidationException::withMessages([
+                'file' => 'No attendance was imported. Check that the file contains employee IDs or biometric IDs mapped in the system.',
+            ]);
+        }
+
+        $skippedRows = $skippedLines + count($logs) - $processed;
+        $dateFrom = min($dates);
+        $dateTo = max($dates);
+
+        return redirect()
+            ->route('admin.attendance.import')
+            ->with('success', "Imported {$processed} attendance punch(es) from {$file->getClientOriginalName()}.")
+            ->with('import_result', [
+                'processed' => $processed,
+                'skipped' => $skippedRows,
+                'date_from' => $dateFrom,
+                'date_to' => $dateTo,
+            ]);
     }
 
     public function hrAdmin(Request $request, AttendanceAbsenceReconciler $absenceReconciler)

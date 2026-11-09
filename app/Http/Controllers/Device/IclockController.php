@@ -7,6 +7,7 @@ use App\Models\Attendance;
 use App\Models\BiometricDevice;
 use App\Models\Employee;
 use App\Models\EmployeeDevice;
+use App\Services\ZktecoAttendanceService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -66,7 +67,7 @@ class IclockController extends Controller
     /**
      * POST /iclock/cdata — device pushes attendance or enrollment records.
      */
-    public function postCdata(Request $request): Response
+    public function postCdata(Request $request, ZktecoAttendanceService $attendanceService): Response
     {
         $sn = $request->query('SN', $request->query('sn', ''));
         $table = $request->query('table', $request->query('action', ''));
@@ -96,7 +97,7 @@ class IclockController extends Controller
         ) === 1;
 
         if (stripos($table, 'ATTLOG') !== false || stripos($body, 'ATTLOG') !== false || $containsAttendanceRows) {
-            $this->processAttendanceLogs($device, $body);
+            $this->processAttendanceLogs($device, $body, $attendanceService);
         }
 
         // Device pushes enrollment user data
@@ -170,12 +171,15 @@ class IclockController extends Controller
      * Parse and save attendance log records from ADMS body.
      *
      * ATTLOG line format (tab-separated):
-     *   PIN  Time  Status  Verify  WorkCode  Reserved
+     *   PIN  Time  Verify  Status  WorkCode  Reserved
      * Example:
-     *   1234\t2026-06-23 09:15:00\t0\t1\t0\t0
+     *   1234\t2026-06-23 09:15:00\t24\t0\t1\t0
      */
-    private function processAttendanceLogs(BiometricDevice $device, string $body): void
-    {
+    private function processAttendanceLogs(
+        BiometricDevice $device,
+        string $body,
+        ZktecoAttendanceService $attendanceService
+    ): void {
         $lines = preg_split('/\r\n|\n|\r/', $body);
         $processed = 0;
 
@@ -195,7 +199,8 @@ class IclockController extends Controller
 
             $pin       = trim($parts[0]);
             $timeStr   = trim($parts[1]);
-            $status    = (int) ($parts[2] ?? 0); // 0=check-in, 1=check-out
+            $statusIndex = count($parts) >= 4 ? 3 : 2;
+            $status = (int) ($parts[$statusIndex] ?? 0); // 0=check-in, 1=check-out
 
             if ($pin === '' || $timeStr === '') {
                 continue;
@@ -216,6 +221,10 @@ class IclockController extends Controller
             $date    = $ts->toDateString();
             $time    = $ts->format('H:i:s');
             $statusForCheckIn = Attendance::statusForCheckIn($time);
+
+            if ($status !== 1) {
+                $attendanceService->detachMisdatedCheckout($employee, $device->name, $ts);
+            }
 
             $attendance = Attendance::query()
                 ->where('employee_id', $employee->id)
@@ -260,10 +269,15 @@ class IclockController extends Controller
             }
 
             $attendance->source = $device->name;
+            if ($status === 1) {
+                $attendance->check_out_date = $date;
+            }
             if (! in_array($attendance->status, ['Absent', 'Leave', 'Overtime'], true) && $attendance->check_in_time) {
                 $attendance->status = Attendance::statusForTimes(
                     $attendance->check_in_time,
-                    $attendance->check_out_time
+                    $attendance->check_out_time,
+                    $attendance->attendance_date->toDateString(),
+                    $attendance->check_out_date?->toDateString()
                 );
             } elseif (
                 ! in_array($attendance->status, ['Absent', 'Leave', 'Overtime'], true)
@@ -289,7 +303,7 @@ class IclockController extends Controller
             } catch (UniqueConstraintViolationException $exception) {
                 $attendance = Attendance::query()
                     ->where('employee_id', $employee->id)
-                    ->whereDate('attendance_date', $date)
+                    ->whereDate('attendance_date', $attendance->attendance_date->toDateString())
                     ->where('source', $device->name)
                     ->first();
 
@@ -306,10 +320,15 @@ class IclockController extends Controller
                 }
 
                 $attendance->source = $device->name;
+                if ($status === 1) {
+                    $attendance->check_out_date = $date;
+                }
                 if (! in_array($attendance->status, ['Absent', 'Leave', 'Overtime'], true) && $attendance->check_in_time) {
                     $attendance->status = Attendance::statusForTimes(
                         $attendance->check_in_time,
-                        $attendance->check_out_time
+                        $attendance->check_out_time,
+                        $attendance->attendance_date->toDateString(),
+                        $attendance->check_out_date?->toDateString()
                     );
                 } elseif (
                     ! in_array($attendance->status, ['Absent', 'Leave', 'Overtime'], true)

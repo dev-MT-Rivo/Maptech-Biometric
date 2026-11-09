@@ -783,6 +783,11 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link @if(request()->routeIs('admin.employee-devices.*')) active @endif" href="{{ route('admin.employee-devices.index') }}">
+                            <i class="fas fa-id-card"></i><span class="nav-text">Employee Devices</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link @if(request()->routeIs('admin.departments.*')) active @endif" href="{{ route('admin.departments.index') }}">
                             <i class="fas fa-sitemap"></i><span class="nav-text">Departments</span>
                         </a>

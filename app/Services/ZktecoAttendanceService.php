@@ -13,6 +13,45 @@ class ZktecoAttendanceService
 {
     public function processLogs(BiometricDevice $device, array $logs): int
     {
+        $processed = $this->processRecords($device->name, $logs);
+        $device->forceFill(['last_synced_at' => now()])->save();
+
+        return $processed;
+    }
+
+    public function processImportedLogs(string $source, array $logs): int
+    {
+        return $this->processRecords($source, $logs);
+    }
+
+    public function detachMisdatedCheckout(Employee $employee, string $source, Carbon $checkInTimestamp): void
+    {
+        $checkInDate = $checkInTimestamp->toDateString();
+        $previousShift = Attendance::query()
+            ->where('employee_id', $employee->id)
+            ->whereDate('attendance_date', $checkInTimestamp->copy()->subDay()->toDateString())
+            ->whereDate('check_out_date', $checkInDate)
+            ->where('check_out_time', $checkInTimestamp->format('H:i:s'))
+            ->where('source', $source)
+            ->whereNotNull('check_in_time')
+            ->first();
+
+        if (! $previousShift) {
+            return;
+        }
+
+        $previousShift->check_out_time = null;
+        $previousShift->check_out_date = null;
+        $previousShift->status = Attendance::statusForTimes(
+            $previousShift->check_in_time,
+            null,
+            $previousShift->attendance_date->toDateString()
+        );
+        $previousShift->save();
+    }
+
+    private function processRecords(string $source, array $logs): int
+    {
         $records = $this->normalizeLogs($logs);
         $processed = 0;
 
@@ -32,10 +71,14 @@ class ZktecoAttendanceService
             $status = $this->resolveStatus($log, $time);
             $isCheckout = $this->isCheckoutLog($log);
 
+            if (! $isCheckout) {
+                $this->detachMisdatedCheckout($employee, $source, $timestamp);
+            }
+
             $attendance = Attendance::query()
                 ->where('employee_id', $employee->id)
                 ->whereDate('attendance_date', $date)
-                ->where('source', $device->name)
+                ->where('source', $source)
                 ->first();
 
             if (! $attendance) {
@@ -68,14 +111,19 @@ class ZktecoAttendanceService
                 }
             }
 
-            $attendance->source = $device->name;
+            $attendance->source = $source;
+            if ($isCheckout) {
+                $attendance->check_out_date = $date;
+            }
             if (
                 ! in_array($attendance->status, ['Absent', 'Leave', 'Overtime'], true)
                 && ($attendance->check_in_time || $attendance->check_out_time)
             ) {
                 $attendance->status = Attendance::statusForTimes(
                     $attendance->check_in_time,
-                    $attendance->check_out_time
+                    $attendance->check_out_time,
+                    $attendance->attendance_date->toDateString(),
+                    $attendance->check_out_date?->toDateString()
                 );
             }
             if (
@@ -94,8 +142,6 @@ class ZktecoAttendanceService
             $attendance->save();
             $processed++;
         }
-
-        $device->forceFill(['last_synced_at' => now()])->save();
 
         return $processed;
     }

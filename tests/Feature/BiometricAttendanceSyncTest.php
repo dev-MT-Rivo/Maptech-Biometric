@@ -57,7 +57,7 @@ class BiometricAttendanceSyncTest extends TestCase
             'POST',
             '/iclock/cdata?SN=browser-request&table=ATTLOG',
             server: ['CONTENT_TYPE' => 'text/plain'],
-            content: "12345\t2026-07-01 08:00:00\t0\t1\t0\t0"
+            content: "12345\t2026-07-01 08:00:00\t24\t0\t1\t0"
         )->assertOk();
 
         $this->assertDatabaseCount('attendances', 0);
@@ -85,9 +85,9 @@ class BiometricAttendanceSyncTest extends TestCase
             '/iclock/cdata?SN=BATCH-DEVICE&table=ATTLOG',
             server: ['CONTENT_TYPE' => 'text/plain'],
             content: implode("\r\n", [
-                "54321\t2026-07-06 08:40:00\t0\t1\t0\t0",
-                "54321\t2026-07-06 08:05:00\t0\t1\t0\t0",
-                "54321\t2026-07-06 17:20:00\t1\t1\t0\t0",
+                "54321\t2026-07-06 08:40:00\t24\t0\t1\t0",
+                "54321\t2026-07-06 08:05:00\t24\t0\t1\t0",
+                "54321\t2026-07-06 17:20:00\t24\t1\t1\t0",
             ])
         )->assertOk();
 
@@ -124,8 +124,8 @@ class BiometricAttendanceSyncTest extends TestCase
             '/iclock/cdata?SN=UNDERTIME-DEVICE&table=ATTLOG',
             server: ['CONTENT_TYPE' => 'text/plain'],
             content: implode("\r\n", [
-                "54322\t2026-10-16 08:15:01\t0\t1\t0\t0",
-                "54322\t2026-10-16 15:59:59\t1\t1\t0\t0",
+                "54322\t2026-10-16 08:15:01\t24\t0\t1\t0",
+                "54322\t2026-10-16 15:59:59\t24\t1\t1\t0",
             ])
         )->assertOk();
 
@@ -135,6 +135,110 @@ class BiometricAttendanceSyncTest extends TestCase
             'check_in_time' => '08:15:01',
             'check_out_time' => '15:59:59',
             'status' => 'Undertime',
+        ]);
+    }
+
+    public function test_adms_keeps_next_day_checkout_on_its_own_calendar_day(): void
+    {
+        $employee = Employee::create([
+            'user_id' => User::factory()->create()->id,
+            'employee_id' => 'EMP-OVERNIGHT',
+            'first_name' => 'Overnight',
+            'last_name' => 'Employee',
+            'email' => 'overnight-employee@example.test',
+            'joining_date' => '2026-01-01',
+            'biometric_id' => '54323',
+        ]);
+        BiometricDevice::create([
+            'name' => 'Overnight device',
+            'serial_number' => 'OVERNIGHT-DEVICE',
+            'sync_mode' => 'push',
+        ]);
+
+        $this->call(
+            'POST',
+            '/iclock/cdata?SN=OVERNIGHT-DEVICE&table=ATTLOG',
+            server: ['CONTENT_TYPE' => 'text/plain'],
+            content: implode("\r\n", [
+                "54323\t2026-10-27 08:00:00\t24\t0\t1\t0",
+                "54323\t2026-10-28 04:00:00\t24\t1\t1\t0",
+            ])
+        )->assertOk();
+
+        $this->assertDatabaseCount('attendances', 2);
+        $october27 = Attendance::query()
+            ->where('employee_id', $employee->id)
+            ->whereDate('attendance_date', '2026-10-27')
+            ->firstOrFail();
+        $october28 = Attendance::query()
+            ->where('employee_id', $employee->id)
+            ->whereDate('attendance_date', '2026-10-28')
+            ->firstOrFail();
+        $this->assertSame('08:00:00', $october27->check_in_time);
+        $this->assertNull($october27->check_out_time);
+        $this->assertNull($october27->check_out_date);
+        $this->assertNull($october28->check_in_time);
+        $this->assertSame('04:00:00', $october28->check_out_time);
+    }
+
+    public function test_adms_detaches_an_exact_next_day_checkin_misfiled_as_previous_day_checkout(): void
+    {
+        $employee = Employee::create([
+            'user_id' => User::factory()->create()->id,
+            'employee_id' => 'EMP-OVERNIGHT-DUPLICATE',
+            'first_name' => 'Overnight',
+            'last_name' => 'Duplicate',
+            'email' => 'overnight-duplicate@example.test',
+            'joining_date' => '2026-01-01',
+            'biometric_id' => '54324',
+        ]);
+        BiometricDevice::create([
+            'name' => 'Overnight duplicate device',
+            'serial_number' => 'OVERNIGHT-DUPLICATE-DEVICE',
+            'sync_mode' => 'push',
+        ]);
+        Attendance::create([
+            'employee_id' => $employee->id,
+            'attendance_date' => '2026-10-27',
+            'check_in_time' => '07:57:58',
+            'check_out_date' => '2026-10-28',
+            'check_out_time' => '00:14:14',
+            'status' => 'Present',
+            'source' => 'Overnight duplicate device',
+        ]);
+        Attendance::create([
+            'employee_id' => $employee->id,
+            'attendance_date' => '2026-10-28',
+            'check_out_date' => '2026-10-28',
+            'check_out_time' => '00:14:21',
+            'status' => 'Present',
+            'source' => 'Overnight duplicate device',
+        ]);
+
+        $this->call(
+            'POST',
+            '/iclock/cdata?SN=OVERNIGHT-DUPLICATE-DEVICE&table=ATTLOG',
+            server: ['CONTENT_TYPE' => 'text/plain'],
+            content: implode("\r\n", [
+                "54324\t2026-10-28 00:14:14\t24\t0\t1\t0",
+                "54324\t2026-10-28 00:14:21\t24\t1\t1\t0",
+            ])
+        )->assertOk();
+
+        $this->assertDatabaseCount('attendances', 2);
+        $this->assertDatabaseHas('attendances', [
+            'employee_id' => $employee->id,
+            'attendance_date' => '2026-10-27 00:00:00',
+            'check_in_time' => '07:57:58',
+            'check_out_date' => null,
+            'check_out_time' => null,
+        ]);
+        $this->assertDatabaseHas('attendances', [
+            'employee_id' => $employee->id,
+            'attendance_date' => '2026-10-28 00:00:00',
+            'check_in_time' => '00:14:14',
+            'check_out_date' => '2026-10-28 00:00:00',
+            'check_out_time' => '00:14:21',
         ]);
     }
 

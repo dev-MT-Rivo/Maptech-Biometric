@@ -80,6 +80,8 @@ Route::middleware(['auth'])->prefix('admin')->name('admin.')->group(function () 
     Route::middleware('role:Super Admin')->group(function () {
         Route::get('attendance', [AttendanceController::class, 'index'])->name('attendance.index');
         Route::post('attendance', [AttendanceController::class, 'store'])->name('attendance.store');
+        Route::get('attendance/import', [AttendanceController::class, 'importForm'])->name('attendance.import');
+        Route::post('attendance/import', [AttendanceController::class, 'importDat'])->name('attendance.import.store');
         Route::delete('attendance/{attendance}', [AttendanceController::class, 'destroy'])->name('attendance.destroy');
         Route::post('attendance/status', [AttendanceController::class, 'updateStatus'])->name('attendance.status');
         Route::post('attendance/{attendance}/overtime-review', [AttendanceController::class, 'reviewOvertime'])->name('attendance.overtime-review');

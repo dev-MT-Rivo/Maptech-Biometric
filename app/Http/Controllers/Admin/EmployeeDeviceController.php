@@ -10,10 +10,42 @@ use Illuminate\Support\Facades\Auth;
 
 class EmployeeDeviceController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $devices = EmployeeDevice::with('employee')->latest()->paginate(10);
-        return view('admin.employee_devices.index', compact('devices'));
+        $search = trim((string) $request->input('search', ''));
+        $primary = $request->input('primary', '');
+
+        $query = EmployeeDevice::query()->with('employee');
+
+        if ($search !== '') {
+            $query->where(function ($query) use ($search) {
+                $query->where('device_identifier', 'like', "%{$search}%")
+                    ->orWhere('device_name', 'like', "%{$search}%")
+                    ->orWhereHas('employee', function ($query) use ($search) {
+                        $query->where('employee_id', 'like', "%{$search}%")
+                            ->orWhere('first_name', 'like', "%{$search}%")
+                            ->orWhere('last_name', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        if ($primary === '1' || $primary === '0') {
+            $query->where('is_primary', $primary === '1');
+        }
+
+        $devices = $query->latest()->paginate(10)->withQueryString();
+        $mappingCount = EmployeeDevice::count();
+        $primaryCount = EmployeeDevice::where('is_primary', true)->count();
+        $assignedEmployeeCount = EmployeeDevice::distinct('employee_id')->count('employee_id');
+
+        return view('admin.employee_devices.index', compact(
+            'devices',
+            'search',
+            'primary',
+            'mappingCount',
+            'primaryCount',
+            'assignedEmployeeCount'
+        ));
     }
 
     public function create()
